@@ -19,6 +19,105 @@ async fn read() {
 }
 
 #[tokio::test]
+async fn read_zeroes() {
+    let mut mock = Builder::new()
+        .read_zeroes(3)
+        .read(b"hello")
+        .read_zeroes(4)
+        .build();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"\0\0\0");
+
+    let n = mock.read(&mut buf).await.expect("read 2");
+    assert_eq!(&buf[..n], b"hello");
+
+    let n = mock.read(&mut buf).await.expect("read 3");
+    assert_eq!(&buf[..n], b"\0\0\0\0");
+}
+
+#[tokio::test]
+async fn read_eof1() {
+    let mut mock = Builder::new().read(b"hello ").eof().build();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"hello ");
+
+    let n = mock.read(&mut buf).await.expect("read 2");
+    assert_eq!(&buf[..n], b"");
+}
+
+#[tokio::test]
+async fn read_eof2() {
+    let mut mock = Builder::new().read(b"hello ").eof().write(b"qqq").build();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"hello ");
+
+    let n = mock.read(&mut buf).await.expect("read 2");
+    assert_eq!(&buf[..n], b"");
+
+    mock.write_all(b"qqq").await.expect("write 1");
+}
+
+#[tokio::test]
+async fn stop_checking1() {
+    let mut mock = Builder::new()
+        .read(b"hello ")
+        .write(b"qqq")
+        .stop_checking()
+        .read(b"eee")
+        .write(b"444")
+        .build();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"hello ");
+
+    mock.write_all(b"qqq").await.expect("write 1");
+}
+
+#[tokio::test]
+#[should_panic]
+async fn stop_checking2() {
+    let mut mock = Builder::new()
+        .read(b"hello ")
+        .write(b"qqq")
+        .stop_checking()
+        .read(b"eee")
+        .write(b"444")
+        .build();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"hello ");
+
+    mock.write_all(b"qqw").await.expect("write 1");
+}
+
+#[tokio::test]
+#[should_panic]
+async fn stop_checking3() {
+    let mut mock = Builder::new()
+        .read(b"hello ")
+        .write(b"qqq")
+        .stop_checking()
+        .read(b"eee")
+        .write(b"444")
+        .build();
+
+    mock.write_all(b"qqq").await.expect("write 1");
+}
+
+#[tokio::test]
 async fn read_error() {
     let error = io::Error::new(io::ErrorKind::Other, "cruel");
     let mut mock = Builder::new()
@@ -49,6 +148,58 @@ async fn write() {
 
     mock.write_all(b"hello ").await.expect("write 1");
     mock.write_all(b"world!").await.expect("write 2");
+}
+
+#[tokio::test]
+async fn write_zeroes1() {
+    let mut mock = Builder::new()
+        .write_zeroes(4)
+        .write(b"hello ")
+        .write_zeroes(3)
+        .write(b"world!")
+        .write_zeroes(2)
+        .build();
+
+    mock.write_all(b"\0\0\0\0").await.expect("write 1");
+    mock.write_all(b"hello ").await.expect("write 2");
+    mock.write_all(b"\0\0\0").await.expect("write 3");
+    mock.write_all(b"world!").await.expect("write 4");
+    mock.write_all(b"\0\0").await.expect("write 5");
+}
+
+#[tokio::test]
+#[should_panic]
+async fn write_zeroes2() {
+    let mut mock = Builder::new()
+        .write_zeroes(4)
+        .write(b"hello ")
+        .write_zeroes(3)
+        .write(b"world!")
+        .write_zeroes(2)
+        .build();
+
+    mock.write_all(b"\0\0\0\0").await.expect("write 1");
+    mock.write_all(b"hello ").await.expect("write 2");
+    mock.write_all(b"\0\x44\0").await.expect("write 3");
+    mock.write_all(b"world!").await.expect("write 4");
+    mock.write_all(b"\0\0").await.expect("write 5");
+}
+
+#[tokio::test]
+async fn write_ignore() {
+    let mut mock = Builder::new()
+        .write_zeroes(4)
+        .write(b"hello ")
+        .write_ignore(3)
+        .write(b"world!")
+        .write_zeroes(2)
+        .build();
+
+    mock.write_all(b"\0\0\0\0").await.expect("write 1");
+    mock.write_all(b"hello ").await.expect("write 2");
+    mock.write_all(b"\0\x44\0").await.expect("write 3");
+    mock.write_all(b"world!").await.expect("write 4");
+    mock.write_all(b"\0\0").await.expect("write 5");
 }
 
 #[tokio::test]

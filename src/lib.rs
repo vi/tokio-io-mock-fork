@@ -62,6 +62,11 @@ enum Action {
     // Mock is not cloned as does not need to check Rc for ref counts.
     ReadError(Option<Arc<io::Error>>),
     WriteError(Option<Arc<io::Error>>),
+    ReadZeroes(usize),
+    WriteZeroes(usize),
+    IgnoreWritten(usize),
+    ReadEof(bool),
+    StopChecking,
 }
 
 struct Inner {
@@ -71,6 +76,7 @@ struct Inner {
     read_wait: Option<Waker>,
     rx: UnboundedReceiverStream<Action>,
     name: String,
+    checks_enabled: bool,
 }
 
 impl Builder {
@@ -85,6 +91,24 @@ impl Builder {
     /// and return `buf`.
     pub fn read(&mut self, buf: &[u8]) -> &mut Self {
         self.actions.push_back(Action::Read(buf.into()));
+        self
+    }
+
+    /// Sequence a `read` operation, resuting in a specified number of zero bytes.
+    ///
+    /// Same as [`Self::read`] with aa zero buffer, but with less memory consumption.
+    ///
+    /// The next operation in the mock's script will be to expect a `read` call.
+    pub fn read_zeroes(&mut self, nbytes: usize) -> &mut Self {
+        self.actions.push_back(Action::ReadZeroes(nbytes));
+        self
+    }
+
+    /// Sequence a read operation that will return 0, i.e. end of file.
+    ///
+    /// The next operation in the mock's script will be to expect a `read` call.
+    pub fn eof(&mut self) -> &mut Self {
+        self.actions.push_back(Action::ReadEof(false));
         self
     }
 
@@ -107,6 +131,24 @@ impl Builder {
         self
     }
 
+    /// Sequence a `write` operation.
+    ///
+    /// The next operation in the mock's script will be to expect a `write`
+    /// call. The written bytes will be asserted to be equal to zero.
+    pub fn write_zeroes(&mut self, nbytes: usize) -> &mut Self {
+        self.actions.push_back(Action::WriteZeroes(nbytes));
+        self
+    }
+
+    /// Sequence a `write` operation.
+    ///
+    /// The next operation in the mock's script will be to expect a `write`
+    /// call. The written bytes will not be checked.
+    pub fn write_ignore(&mut self, nbytes: usize) -> &mut Self {
+        self.actions.push_back(Action::IgnoreWritten(nbytes));
+        self
+    }
+
     /// Sequence a `write` operation that produces an error.
     ///
     /// The next operation in the mock's script will be to expect a `write`
@@ -114,6 +156,17 @@ impl Builder {
     pub fn write_error(&mut self, error: io::Error) -> &mut Self {
         let error = Some(error.into());
         self.actions.push_back(Action::WriteError(error));
+        self
+    }
+
+    /// Sequence a special event that makes this Mock stop asserting any operation (i.e. allow everything).
+    ///
+    /// Reaching this means the test is already succeeded and possible
+    /// further operations are likely irrelevent.
+    ///
+    /// More reads can still be sequenced after this.
+    pub fn stop_checking(&mut self) -> &mut Self {
+        self.actions.push_back(Action::StopChecking);
         self
     }
 
@@ -159,6 +212,24 @@ impl Handle {
         self
     }
 
+    /// Sequence a `read` operation, resuting in a specified number of zero bytes.
+    ///
+    /// Same as [`Self::read`] with aa zero buffer, but with less memory consumption.
+    ///
+    /// The next operation in the mock's script will be to expect a `read` call.
+    pub fn read_zeroes(&mut self, nbytes: usize) -> &mut Self {
+        self.tx.send(Action::ReadZeroes(nbytes)).unwrap();
+        self
+    }
+
+    /// Sequence a read operation that will return 0, i.e. end of file.
+    ///
+    /// The next operation in the mock's script will be to expect a `read` call.
+    pub fn eof(&mut self) -> &mut Self {
+        self.tx.send(Action::ReadEof(false)).unwrap();
+        self
+    }
+
     /// Sequence a `read` operation error.
     ///
     /// The next operation in the mock's script will be to expect a `read` call
@@ -178,6 +249,24 @@ impl Handle {
         self
     }
 
+    /// Sequence a `write` operation.
+    ///
+    /// The next operation in the mock's script will be to expect a `write`
+    /// call. The written bytes will be asserted to be equal to zero.
+    pub fn write_zeroes(&mut self, nbytes: usize) -> &mut Self {
+        self.tx.send(Action::WriteZeroes(nbytes)).unwrap();
+        self
+    }
+
+    /// Sequence a `write` operation.
+    ///
+    /// The next operation in the mock's script will be to expect a `write`
+    /// call. The written bytes will not be checked.
+    pub fn write_ignore(&mut self, nbytes: usize) -> &mut Self {
+        self.tx.send(Action::IgnoreWritten(nbytes)).unwrap();
+        self
+    }
+
     /// Sequence a `write` operation error.
     ///
     /// The next operation in the mock's script will be to expect a `write`
@@ -185,6 +274,17 @@ impl Handle {
     pub fn write_error(&mut self, error: io::Error) -> &mut Self {
         let error = Some(error.into());
         self.tx.send(Action::WriteError(error)).unwrap();
+        self
+    }
+
+    /// Sequence a special event that makes this Mock stop asserting any operation (i.e. allow everything).
+    ///
+    /// Reaching this means the test is already succeeded and possible
+    /// further operations are likely irrelevent.
+    ///
+    /// More reads can still be sequenced after this.
+    pub fn stop_checking(&mut self) -> &mut Self {
+        self.tx.send(Action::StopChecking).unwrap();
         self
     }
 }
@@ -202,6 +302,7 @@ impl Inner {
             rx,
             waiting: None,
             name,
+            checks_enabled: true,
         };
 
         let handle = Handle { tx };
@@ -215,6 +316,18 @@ impl Inner {
 
     fn read(&mut self, dst: &mut ReadBuf<'_>) -> io::Result<()> {
         match self.action() {
+            Some(&mut Action::ReadZeroes(ref mut nbytes)) => {
+                let n = cmp::min(dst.remaining(), *nbytes);
+                let nfilled = dst.filled().len();
+                dst.initialize_unfilled_to(nfilled + n)[nfilled..].fill(0);
+                dst.set_filled(nfilled + n);
+                *nbytes -= n;
+                Ok(())
+            }
+            Some(&mut Action::ReadEof(ref mut observed)) => {
+                *observed = true;
+                Ok(())
+            }
             Some(&mut Action::Read(ref mut data)) => {
                 // Figure out how much to copy
                 let n = cmp::min(dst.remaining(), data.len());
@@ -258,12 +371,18 @@ impl Inner {
             return Err(err);
         }
 
+        let mut checks_enabled = self.checks_enabled;
+
         for i in 0..self.actions.len() {
-            match self.actions[i] {
+            let action = &mut self.actions[i];
+            let ignore_written = matches!(action, Action::IgnoreWritten { .. });
+            match action {
                 Action::Write(ref mut expect) => {
                     let n = cmp::min(src.len(), expect.len());
 
-                    assert_eq!(&src[..n], &expect[..n], "name={} i={}", self.name, i);
+                    if self.checks_enabled {
+                        assert_eq!(&src[..n], &expect[..n], "name={} i={}", self.name, i);
+                    }
 
                     // Drop data that was matched
                     expect.drain(..n);
@@ -275,6 +394,32 @@ impl Inner {
                         return Ok(ret);
                     }
                 }
+                Action::WriteZeroes(ref mut nbytes) | Action::IgnoreWritten(ref mut nbytes) => {
+                    let n = cmp::min(src.len(), *nbytes);
+
+                    if checks_enabled && !ignore_written {
+                        for (j, x) in src[..n].iter().enumerate() {
+                            assert_eq!(
+                                *x,
+                                0,
+                                "byte_index={j} name={} remaining actions: {}",
+                                self.name,
+                                self.actions.len() - i
+                            );
+                        }
+                    }
+
+                    // Drop data that was matched
+                    *nbytes -= n;
+                    src = &src[n..];
+
+                    ret += n;
+
+                    if src.is_empty() {
+                        return Ok(ret);
+                    }
+                }
+                Action::StopChecking => checks_enabled = false,
                 Action::Wait(..) | Action::WriteError(..) => {
                     break;
                 }
@@ -306,8 +451,28 @@ impl Inner {
                         break;
                     }
                 }
+                Action::ReadZeroes(n) => {
+                    if n > 0 {
+                        break;
+                    }
+                }
+                Action::ReadEof(ref observed) => {
+                    if !observed {
+                        break;
+                    }
+                }
                 Action::Write(ref mut data) => {
                     if !data.is_empty() {
+                        break;
+                    }
+                }
+                Action::WriteZeroes(n) => {
+                    if n > 0 {
+                        break;
+                    }
+                }
+                Action::IgnoreWritten(n) => {
+                    if n > 0 {
                         break;
                     }
                 }
@@ -329,6 +494,10 @@ impl Inner {
                     if error.is_some() {
                         break;
                     }
+                }
+                Action::StopChecking => {
+                    self.checks_enabled = false;
+                    break;
                 }
             }
 
@@ -425,7 +594,11 @@ impl AsyncWrite for Mock {
                         self.inner.actions.push_back(action);
                     }
                     Poll::Ready(None) => {
-                        panic!("unexpected write {}", self.pmsg());
+                        if self.inner.checks_enabled {
+                            panic!("unexpected write {}", self.pmsg());
+                        } else {
+                            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                        }
                     }
                 }
             }
@@ -436,7 +609,11 @@ impl AsyncWrite for Mock {
                         let until = Instant::now() + rem;
                         self.inner.sleep = Some(Box::pin(time::sleep_until(until)));
                     } else {
-                        panic!("unexpected WouldBlock {}", self.pmsg());
+                        if self.inner.checks_enabled {
+                            panic!("unexpected WouldBlock {}", self.pmsg());
+                        } else {
+                            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                        }
                     }
                 }
                 Ok(0) => {
@@ -452,7 +629,11 @@ impl AsyncWrite for Mock {
                             continue;
                         }
                         None => {
-                            panic!("unexpected write {}", self.pmsg());
+                            if self.inner.checks_enabled {
+                                panic!("unexpected write {}", self.pmsg());
+                            } else {
+                                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                            }
                         }
                     }
                 }
@@ -481,15 +662,39 @@ impl Drop for Mock {
             return;
         }
 
+        if !self.inner.checks_enabled {
+            return;
+        }
+
         self.inner.actions.iter().for_each(|a| match a {
             Action::Read(data) => assert!(
                 data.is_empty(),
                 "There is still data left to read. {}",
                 self.pmsg()
             ),
+            Action::ReadZeroes(nbytes) => assert!(
+                *nbytes == 0,
+                "There is still data left to read. {}",
+                self.pmsg()
+            ),
+            Action::ReadEof(observed) => assert!(
+                observed,
+                "There is still a read EOF event that was not observed {}",
+                self.pmsg()
+            ),
             Action::Write(data) => assert!(
                 data.is_empty(),
                 "There is still data left to write. {}",
+                self.pmsg()
+            ),
+            Action::WriteZeroes(nbytes) => assert!(
+                *nbytes == 0,
+                "There is still data left to write. {}",
+                self.pmsg()
+            ),
+            Action::IgnoreWritten(nbytes) => assert!(
+                *nbytes == 0,
+                "There is still data left to write (even though content is to be ignored). {}",
                 self.pmsg()
             ),
             _ => (),
