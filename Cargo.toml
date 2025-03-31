@@ -5,9 +5,20 @@ edition = "2021"
 
 [dependencies]
 futures-core = "0.3.31"
+hex = { version = "0.4.3", optional = true }
 tokio = { version = "1.44.1", features = ["time"] }
 tokio-stream = "0.1.17"
 
 [dev-dependencies]
 futures-util = "0.3.31"
 tokio = { version = "1.44.1", features = ["io-util", "macros", "rt", "test-util"] }
+
+[features]
+text-scenarios = ["dep:hex"]
+
+[package.metadata."docs.rs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs_alt"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs_alt)'] }

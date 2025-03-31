@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs_alt, feature(doc_cfg))]
 //! A mock type implementing [`AsyncRead`] and [`AsyncWrite`].
 //!
 //!
@@ -29,6 +30,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, ready, Poll, Waker};
 use std::{cmp, io};
+
+#[cfg(feature="text-scenarios")]
+mod text_scenario;
+
+#[cfg(feature="text-scenarios")]
+#[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
+pub use text_scenario::ParseError;
 
 /// An I/O object that follows a predefined script.
 ///
@@ -186,6 +194,58 @@ impl Builder {
         self
     }
 
+    /// Sequence multiple operations using a special text scenario.
+    /// 
+    /// Text scenario commands consist of a command character, subcommand 
+    /// character (if needed), content (if needed) and `|` terminator/separator.
+    /// 
+    /// Parsing is not very strict.
+    /// 
+    /// Commands:
+    /// 
+    /// * `R` - sequence specified bytes to be read
+    /// * `W` - sequence specified bytes to be written
+    /// * `ZR` - sequence specified number of zero bytes to be read
+    /// * `ZW` - sequence specified number of zero bytes to be written
+    /// * `I` - sequence specified number of written bytes to be ignored
+    /// * `X` - sequence a EOF event
+    /// * `Q` - sequence stop_checking event
+    /// * `ER` - sequence a read error
+    /// * `EW` - sequence a write error
+    /// * `T` - sequence a sleep for a specified number of milliseconds
+    /// * `N` - set name of this mock stream object
+    /// 
+    /// Most characters after `R` or `W` or `N` become content of the buffer.
+    /// Exceptions: `|` character that marks end of command, leading (but not trailing) whitespace
+    /// and escape sequences starting with `\`, like `\n` or `\xFF`.
+    /// 
+    /// Numbers for `ZR`, `ZW`, `I` or `T` can be prefixed with `x` or `0x` to use hex instead of dec.
+    /// 
+    /// Examples:
+    /// 
+    /// * `R hello|W world` is equivalent to `.read(b"hello").write(b"world")`
+    /// * `R \x55\x00| ZR x5500| R \x00\x03| ZR 3` is equivalent to `.read(b"\x55\x00").read_zeroes(0x5500).read(b"\x00\x03").read_zeroes(3)`
+    /// * `R cat; echo qqq\n| R 1234|W 1234| R 56|W 56| X | W qqq|`
+    /// * `N calc|R 2+2|W 4|R 3+$RANDOM|Q`
+    /// * `R PING|W PONG|T5000|R PING|W PONG|T5000|ER`
+    /// 
+    /// Mnemonics/explanations:
+    /// 
+    /// * `T` - timeout, timer
+    /// * `ZR` instead of `RZ` because of `Z` would be interpreted as a content of `R`
+    /// * `Q` - quiet mode, quit checking, quash all assertions
+    /// * `X` - eXit reading, eXtend writer span when reading is already finished. `E` is already busy for injected errors.
+    #[cfg(feature="text-scenarios")]
+    #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
+    pub fn text_scenario(&mut self, scenario: &str) -> Result<&mut Self, ParseError> {
+        let (items, name) = text_scenario::parse_text_scenario(scenario)?;
+        if let Some(name) = name {
+            self.name = name;
+        }
+        self.actions.extend(items);
+        Ok(self)
+    }
+
     /// Build a `Mock` value according to the defined script.
     pub fn build(&mut self) -> Mock {
         let (mock, _) = self.build_with_handle();
@@ -286,6 +346,24 @@ impl Handle {
     pub fn stop_checking(&mut self) -> &mut Self {
         self.tx.send(Action::StopChecking).unwrap();
         self
+    }
+
+    /// Sequence multiple operations using a special text scenario.
+    /// 
+    /// See [`Builder::text_scenario`] for the description of the text content.
+    /// 
+    /// Note that `N` (set name) command is ignored.
+    #[cfg(feature="text-scenarios")]
+    #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
+    pub fn text_scenario(&mut self, scenario: &str) -> Result<&mut Self, ParseError> {
+        let (items, name) = text_scenario::parse_text_scenario(scenario)?;
+        if let Some(_name) = name {
+            // ignoring the name in this context
+        }
+        for x in items {
+            self.tx.send(x).unwrap();
+        }
+        Ok(self)
     }
 }
 
