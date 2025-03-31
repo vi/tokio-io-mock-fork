@@ -31,10 +31,10 @@ use std::sync::Arc;
 use std::task::{self, ready, Poll, Waker};
 use std::{cmp, io};
 
-#[cfg(feature="text-scenarios")]
+#[cfg(feature = "text-scenarios")]
 mod text_scenario;
 
-#[cfg(feature="text-scenarios")]
+#[cfg(feature = "text-scenarios")]
 #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
 pub use text_scenario::ParseError;
 
@@ -85,6 +85,8 @@ struct Inner {
     rx: UnboundedReceiverStream<Action>,
     name: String,
     checks_enabled: bool,
+    read_bytes: u64,
+    written_bytes: u64,
 }
 
 impl Builder {
@@ -195,14 +197,14 @@ impl Builder {
     }
 
     /// Sequence multiple operations using a special text scenario.
-    /// 
-    /// Text scenario commands consist of a command character, subcommand 
+    ///
+    /// Text scenario commands consist of a command character, subcommand
     /// character (if needed), content (if needed) and `|` terminator/separator.
-    /// 
+    ///
     /// Parsing is not very strict.
-    /// 
+    ///
     /// Commands:
-    /// 
+    ///
     /// * `R` - sequence specified bytes to be read
     /// * `W` - sequence specified bytes to be written
     /// * `ZR` - sequence specified number of zero bytes to be read
@@ -214,28 +216,28 @@ impl Builder {
     /// * `EW` - sequence a write error
     /// * `T` - sequence a sleep for a specified number of milliseconds
     /// * `N` - set name of this mock stream object
-    /// 
+    ///
     /// Most characters after `R` or `W` or `N` become content of the buffer.
     /// Exceptions: `|` character that marks end of command, leading (but not trailing) whitespace
     /// and escape sequences starting with `\`, like `\n` or `\xFF`.
-    /// 
+    ///
     /// Numbers for `ZR`, `ZW`, `I` or `T` can be prefixed with `x` or `0x` to use hex instead of dec.
-    /// 
+    ///
     /// Examples:
-    /// 
+    ///
     /// * `R hello|W world` is equivalent to `.read(b"hello").write(b"world")`
     /// * `R \x55\x00| ZR x5500| R \x00\x03| ZR 3` is equivalent to `.read(b"\x55\x00").read_zeroes(0x5500).read(b"\x00\x03").read_zeroes(3)`
     /// * `R cat; echo qqq\n| R 1234|W 1234| R 56|W 56| X | W qqq|`
     /// * `N calc|R 2+2|W 4|R 3+$RANDOM|Q`
     /// * `R PING|W PONG|T5000|R PING|W PONG|T5000|ER`
-    /// 
+    ///
     /// Mnemonics/explanations:
-    /// 
+    ///
     /// * `T` - timeout, timer
     /// * `ZR` instead of `RZ` because of `Z` would be interpreted as a content of `R`
     /// * `Q` - quiet mode, quit checking, quash all assertions
     /// * `X` - eXit reading, eXtend writer span when reading is already finished. `E` is already busy for injected errors.
-    #[cfg(feature="text-scenarios")]
+    #[cfg(feature = "text-scenarios")]
     #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
     pub fn text_scenario(&mut self, scenario: &str) -> Result<&mut Self, ParseError> {
         let (items, name) = text_scenario::parse_text_scenario(scenario)?;
@@ -349,11 +351,11 @@ impl Handle {
     }
 
     /// Sequence multiple operations using a special text scenario.
-    /// 
+    ///
     /// See [`Builder::text_scenario`] for the description of the text content.
-    /// 
+    ///
     /// Note that `N` (set name) command is ignored.
-    #[cfg(feature="text-scenarios")]
+    #[cfg(feature = "text-scenarios")]
     #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
     pub fn text_scenario(&mut self, scenario: &str) -> Result<&mut Self, ParseError> {
         let (items, name) = text_scenario::parse_text_scenario(scenario)?;
@@ -381,6 +383,8 @@ impl Inner {
             waiting: None,
             name,
             checks_enabled: true,
+            read_bytes: 0,
+            written_bytes: 0,
         };
 
         let handle = Handle { tx };
@@ -400,6 +404,7 @@ impl Inner {
                 dst.initialize_unfilled_to(nfilled + n)[nfilled..].fill(0);
                 dst.set_filled(nfilled + n);
                 *nbytes -= n;
+                self.read_bytes += n as u64;
                 Ok(())
             }
             Some(&mut Action::ReadEof(ref mut observed)) => {
@@ -415,6 +420,8 @@ impl Inner {
 
                 // Drain the data from the source
                 data.drain(..n);
+
+                self.read_bytes += n as u64;
 
                 Ok(())
             }
@@ -451,7 +458,8 @@ impl Inner {
 
         let mut checks_enabled = self.checks_enabled;
 
-        for i in 0..self.actions.len() {
+        let n_remaining_actions = self.actions.len();
+        for i in 0..n_remaining_actions {
             let action = &mut self.actions[i];
             let ignore_written = matches!(action, Action::IgnoreWritten { .. });
             match action {
@@ -459,8 +467,17 @@ impl Inner {
                     let n = cmp::min(src.len(), expect.len());
 
                     if self.checks_enabled {
-                        assert_eq!(&src[..n], &expect[..n], "name={} i={}", self.name, i);
+                        assert_eq!(
+                            &src[..n],
+                            &expect[..n],
+                            "name={} r={} w={} remaining actions: {}",
+                            self.name,
+                            self.read_bytes,
+                            self.written_bytes,
+                            n_remaining_actions - i
+                        );
                     }
+                    self.written_bytes += n as u64;
 
                     // Drop data that was matched
                     expect.drain(..n);
@@ -477,14 +494,19 @@ impl Inner {
 
                     if checks_enabled && !ignore_written {
                         for (j, x) in src[..n].iter().enumerate() {
+                            self.written_bytes += 1;
                             assert_eq!(
                                 *x,
                                 0,
-                                "byte_index={j} name={} remaining actions: {}",
+                                "byte_index={j} r={} w={} name={} remaining actions: {}",
                                 self.name,
-                                self.actions.len() - i
+                                self.read_bytes,
+                                self.written_bytes,
+                                n_remaining_actions - i
                             );
                         }
+                    } else {
+                        self.written_bytes += n as u64;
                     }
 
                     // Drop data that was matched
@@ -816,13 +838,21 @@ struct PanicMsgSnippet<'a>(&'a Inner);
 impl<'a> fmt::Display for PanicMsgSnippet<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.name.is_empty() {
-            write!(f, "({} actions remain)", self.0.actions.len())
+            write!(
+                f,
+                "({} actions remain, {} bytes was read, {} bytes was written)",
+                self.0.actions.len(),
+                self.0.read_bytes,
+                self.0.written_bytes,
+            )
         } else {
             write!(
                 f,
-                "(name {}, {} actions remain)",
+                "(name {}, {} actions remain, {} bytes was read, {} bytes was written)",
                 self.0.name,
-                self.0.actions.len()
+                self.0.actions.len(),
+                self.0.read_bytes,
+                self.0.written_bytes,
             )
         }
     }
