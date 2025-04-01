@@ -169,6 +169,10 @@ pub(crate) fn parse_text_scenario(
                 actions.push(Action::StopChecking);
                 state=WaitingForCommandCharacter;
             }
+            (WaitingForCommandCharacter, b'D' | b'd') => {
+                actions.push(Action::WriteShutdown(false));
+                state=WaitingForCommandCharacter;
+            }
             (WaitingForCommandCharacter, b'i' | b'I') => {
                 bufmode = BufferMode::IgnoreWritten;
                 state = NumberFirst;
@@ -322,6 +326,7 @@ fn summarize_actions<'a>(actions: impl IntoIterator<Item = &'a Action>) -> Strin
             Action::Wait(_duration) => s.push_str("t"),
             Action::ReadError(_error) => s.push_str("ER"),
             Action::WriteError(_error) => s.push_str("EW"),
+            Action::WriteShutdown(_) => s.push_str("D"),
             Action::ReadZeroes(n) => s.push_str(&format!("ZR{}", n)),
             Action::WriteZeroes(n) => s.push_str(&format!("ZW{}", n)),
             Action::IgnoreWritten(n) => s.push_str(&format!("I{}", n)),
@@ -370,6 +375,6 @@ fn text_scenaio_4() {
 
 #[test]
 fn text_scenaio_5() {
-    let ret = parse_text_scenario("X|Q|I55").unwrap();
-    assert_eq!(summarize_actions(&ret.0), "XQI55");
+    let ret = parse_text_scenario("X|Q|I55|D").unwrap();
+    assert_eq!(summarize_actions(&ret.0), "XQI55D");
 }

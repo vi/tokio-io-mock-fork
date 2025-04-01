@@ -1,6 +1,6 @@
 #![cfg_attr(docsrs_alt, feature(doc_cfg))]
 //! A mock type implementing [`AsyncRead`] and [`AsyncWrite`].
-//! 
+//!
 //! (fork of [`tokio_test::io`](https://docs.rs/tokio-test/latest/tokio_test/io/index.html)
 //!
 //!
@@ -46,6 +46,8 @@ pub use text_scenario::ParseError;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MockOutcomeError {
     UnexpectedWrite,
+    WriteInsteadOfShutdown,
+    ShutdownInsteadOfWrite,
     WrittenByteMismatch { expected: u8, actual: u8 },
     RemainingUnreadData,
     RemainingUnwrittenData,
@@ -63,6 +65,12 @@ impl std::fmt::Display for MockOutcomeError {
             MockOutcomeError::RemainingUnreadData => f.write_str("data remains to be read"),
             MockOutcomeError::RemainingUnwrittenData => f.write_str("data remains to be written"),
             MockOutcomeError::Other => f.write_str("other error"),
+            MockOutcomeError::WriteInsteadOfShutdown => {
+                f.write_str("write where shutdown was expected")
+            }
+            MockOutcomeError::ShutdownInsteadOfWrite => {
+                f.write_str("shutdown where a write was expected")
+            }
         }
     }
 }
@@ -117,6 +125,7 @@ pub struct Builder {
     // Sequence of actions for the Mock to take
     actions: VecDeque<Action>,
     name: String,
+    shutdown_checking_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +137,7 @@ enum Action {
     // Mock is not cloned as does not need to check Rc for ref counts.
     ReadError(Option<Arc<io::Error>>),
     WriteError(Option<Arc<io::Error>>),
+    WriteShutdown(bool),
     ReadZeroes(usize),
     WriteZeroes(usize),
     IgnoreWritten(usize),
@@ -145,6 +155,7 @@ struct Inner {
     checks_enabled: bool,
     read_bytes: u64,
     written_bytes: u64,
+    shutdown_checking_enabled: bool,
     #[cfg(feature = "panicless-mode")]
     panicless_tx: Option<tokio::sync::oneshot::Sender<MockOutcome>>,
 }
@@ -232,6 +243,23 @@ impl Builder {
         self
     }
 
+    /// Check that [`AsyncWrite::poll_shutdown`]s happen where needed.
+    ///
+    /// It is disabled by default for compatibility with `tokio_test::io::Mock`.
+    pub fn enable_shutdown_checking(&mut self) -> &mut Self {
+        self.shutdown_checking_enabled = true;
+        self
+    }
+
+    /// Sequence a `shutdown` operation that corresponds to an expected [`AsyncWrite::poll_shutdown`] call.
+    ///
+    /// Automatically does [`Self::enable_shutdown_checking`].
+    pub fn write_shutdown(&mut self) -> &mut Self {
+        self.shutdown_checking_enabled = true;
+        self.actions.push_back(Action::WriteShutdown(false));
+        self
+    }
+
     /// Sequence a special event that makes this Mock stop asserting any operation (i.e. allow everything).
     ///
     /// Reaching this means the test is already succeeded and possible
@@ -277,6 +305,7 @@ impl Builder {
     /// * `Q` - sequence stop_checking event
     /// * `ER` - sequence a read error
     /// * `EW` - sequence a write error
+    /// * `D` - sequence a write shutdown
     /// * `T` - sequence a sleep for a specified number of milliseconds
     /// * `N` - set name of this mock stream object
     ///
@@ -300,6 +329,7 @@ impl Builder {
     /// * `ZR` instead of `RZ` because of `Z` would be interpreted as a content of `R`
     /// * `Q` - quiet mode, quit checking, quash all assertions
     /// * `X` - eXit reading, eXtend writer span when reading is already finished. `E` is already busy for injected errors.
+    /// * `D` - shutDown, `^D`` to send EOF in console
     #[cfg(feature = "text-scenarios")]
     #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
     pub fn text_scenario(&mut self, scenario: &str) -> Result<&mut Self, ParseError> {
@@ -319,7 +349,11 @@ impl Builder {
 
     /// Build a `Mock` value paired with a handle
     pub fn build_with_handle(&mut self) -> (Mock, Handle) {
-        let (inner, handle) = Inner::new(self.actions.clone(), self.name.clone());
+        let (inner, handle) = Inner::new(
+            self.actions.clone(),
+            self.name.clone(),
+            self.shutdown_checking_enabled,
+        );
 
         let mock = Mock { inner };
 
@@ -334,7 +368,11 @@ impl Builder {
     pub fn build_panicless(
         &mut self,
     ) -> (Mock, Handle, tokio::sync::oneshot::Receiver<MockOutcome>) {
-        let (mut inner, handle) = Inner::new(self.actions.clone(), self.name.clone());
+        let (mut inner, handle) = Inner::new(
+            self.actions.clone(),
+            self.name.clone(),
+            self.shutdown_checking_enabled,
+        );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -424,6 +462,14 @@ impl Handle {
         self
     }
 
+    /// Sequence a `shutdown` operation that corresponds to an expected [`AsyncWrite::poll_shutdown`] call.
+    ///
+    /// Note that unlike with [`Builder::write_shutdown`] you need to do [`Builder::enable_shutdown_checking`].explicitly.
+    pub fn write_shutdown(&mut self) -> &mut Self {
+        self.tx.send(Action::WriteShutdown(false)).unwrap();
+        self
+    }
+
     /// Sequence a special event that makes this Mock stop asserting any operation (i.e. allow everything).
     ///
     /// Reaching this means the test is already succeeded and possible
@@ -455,7 +501,11 @@ impl Handle {
 }
 
 impl Inner {
-    fn new(actions: VecDeque<Action>, name: String) -> (Inner, Handle) {
+    fn new(
+        actions: VecDeque<Action>,
+        name: String,
+        shutdown_checking_enabled: bool,
+    ) -> (Inner, Handle) {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let rx = UnboundedReceiverStream::new(rx);
@@ -470,6 +520,7 @@ impl Inner {
             checks_enabled: true,
             read_bytes: 0,
             written_bytes: 0,
+            shutdown_checking_enabled,
             #[cfg(feature = "panicless-mode")]
             panicless_tx: None,
         };
@@ -557,7 +608,7 @@ impl Inner {
                     let mut already_checked = false;
 
                     #[cfg(feature = "panicless-mode")]
-                    if self.checks_enabled && self.panicless_tx.is_some() {
+                    if checks_enabled && self.panicless_tx.is_some() {
                         for i in 0..n {
                             let expected = expect[i];
                             let actual = src[i];
@@ -610,7 +661,7 @@ impl Inner {
                     let mut already_checked = false;
 
                     #[cfg(feature = "panicless-mode")]
-                    if self.checks_enabled && !ignore_written && self.panicless_tx.is_some() {
+                    if checks_enabled && !ignore_written && self.panicless_tx.is_some() {
                         for i in 0..n {
                             let expected = 0;
                             let actual = src[i];
@@ -660,6 +711,33 @@ impl Inner {
                         return Ok(ret);
                     }
                 }
+                Action::WriteShutdown(ref mut observed) => {
+                    #[cfg(feature = "panicless-mode")]
+                    if checks_enabled && self.panicless_tx.is_some() {
+                        let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
+                            outcome: Err(MockOutcomeError::WriteInsteadOfShutdown),
+                            total_read_bytes: self.read_bytes,
+                            total_written_bytes: self.written_bytes,
+                        });
+                        self.checks_enabled = false;
+                        *observed=true;
+                        return Err(io::ErrorKind::InvalidData.into())
+                    }
+
+                    if checks_enabled  {
+                            panic!(
+                                "unexpected write (a shutdown was expected) r={} w={} name={} remaining actions: {}",
+                                self.read_bytes,
+                                self.written_bytes,
+                                self.name,
+                                n_remaining_actions - i
+                            );
+                        
+                    } else {
+                        *observed=true;
+                        return Err(io::ErrorKind::InvalidData.into())
+                    }
+                }
                 Action::StopChecking => checks_enabled = false,
                 Action::Wait(..) | Action::WriteError(..) => {
                     break;
@@ -671,6 +749,61 @@ impl Inner {
         }
 
         Ok(ret)
+    }
+
+    fn shutdown(&mut self) -> io::Result<()> {
+        if self.actions.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(&mut Action::Wait(..)) = self.action() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
+        let mut checks_enabled = self.checks_enabled;
+
+        let n_remaining_actions = self.actions.len();
+        for i in 0..n_remaining_actions {
+            let action = &mut self.actions[i];
+            match action {
+                Action::Write(..)
+                | Action::IgnoreWritten(..)
+                | Action::WriteError(..)
+                | Action::WriteZeroes(..) => {
+                    #[cfg(feature = "panicless-mode")]
+                    if self.checks_enabled && self.panicless_tx.is_some() {
+                        let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
+                            outcome: Err(MockOutcomeError::ShutdownInsteadOfWrite),
+                            total_read_bytes: self.read_bytes,
+                            total_written_bytes: self.written_bytes,
+                        });
+                        self.checks_enabled = false;
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+
+                    if checks_enabled {
+                        panic!(
+                            "Unexpected shutdown (there are more pending write actions) name={} r={} w={} remaining actions: {}",
+                            self.name,
+                            self.read_bytes,
+                            self.written_bytes,
+                            n_remaining_actions - i
+                        );
+                    }
+                }
+                Action::WriteShutdown(ref mut observed) => {
+                    *observed = true;
+                    return Ok(());
+                }
+                Action::StopChecking => checks_enabled = false,
+                Action::Wait(..) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn remaining_wait(&mut self) -> Option<Duration> {
@@ -733,6 +866,11 @@ impl Inner {
                 }
                 Action::ReadError(ref mut error) | Action::WriteError(ref mut error) => {
                     if error.is_some() {
+                        break;
+                    }
+                }
+                Action::WriteShutdown(ref observed) => {
+                    if !*observed {
                         break;
                     }
                 }
@@ -879,7 +1017,7 @@ impl AsyncWrite for Mock {
                 }
                 Ok(0) => {
                     // TODO: Is this correct?
-                    if !self.inner.actions.is_empty() {
+                    if self.inner.action().is_some() {
                         return Poll::Pending;
                     }
 
@@ -920,8 +1058,62 @@ impl AsyncWrite for Mock {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+        if !self.inner.shutdown_checking_enabled {
+            return Poll::Ready(Ok(()));
+        }
+        loop {
+            if let Some(ref mut sleep) = self.inner.sleep {
+                ready!(Pin::new(sleep).poll(cx));
+            }
+
+            // If a sleep is set, it has already fired
+            self.inner.sleep = None;
+
+            if self.inner.actions.is_empty() {
+                match self.inner.poll_action(cx) {
+                    Poll::Pending => {
+                        // do not propagate pending
+                    }
+                    Poll::Ready(Some(action)) => {
+                        self.inner.actions.push_back(action);
+                    }
+                    Poll::Ready(None) => {
+                        // OK to omit shutdown at the end
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+            }
+
+            match self.inner.shutdown() {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Some(rem) = self.inner.remaining_wait() {
+                        let until = Instant::now() + rem;
+                        self.inner.sleep = Some(Box::pin(time::sleep_until(until)));
+                    } else {
+                        #[cfg(feature = "panicless-mode")]
+                        if self.inner.checks_enabled && self.inner.panicless_tx.is_some() {
+                            let _ = self.inner.panicless_tx.take().unwrap().send(MockOutcome {
+                                outcome: Err(MockOutcomeError::Other),
+                                total_read_bytes: self.inner.read_bytes,
+                                total_written_bytes: self.inner.written_bytes,
+                            });
+                            self.inner.checks_enabled = false;
+                        }
+
+                        if self.inner.checks_enabled {
+                            panic!("unexpected WouldBlock {}", self.pmsg());
+                        } else {
+                            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                        }
+                    }
+                }
+                ret => {
+                    self.maybe_wakeup_reader();
+                    return Poll::Ready(ret);
+                }
+            }
+        }
     }
 }
 

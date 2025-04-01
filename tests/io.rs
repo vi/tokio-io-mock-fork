@@ -407,7 +407,6 @@ async fn write_panicless_err() {
     );
 }
 
-
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_err2() {
@@ -428,7 +427,6 @@ async fn write_panicless_err2() {
         })
     );
 }
-
 
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
@@ -451,7 +449,6 @@ async fn write_panicless_zero() {
     );
 }
 
-
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_zero_err() {
@@ -466,13 +463,15 @@ async fn write_panicless_zero_err() {
     assert_eq!(
         p.await,
         Ok(tokio_io_mock_fork::MockOutcome {
-            outcome: Err(tokio_io_mock_fork::MockOutcomeError::WrittenByteMismatch { expected: 0, actual: 5 }),
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::WrittenByteMismatch {
+                expected: 0,
+                actual: 5
+            }),
             total_read_bytes: 0,
             total_written_bytes: 7,
         })
     );
 }
-
 
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
@@ -495,12 +494,10 @@ async fn write_panicless_err3() {
     );
 }
 
-
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_unexpected() {
-    let (mut mock, _, p) = Builder::new()
-        .build_panicless();
+    let (mut mock, _, p) = Builder::new().build_panicless();
 
     mock.write_all(b"hello").await.expect_err("write 1");
     drop(mock);
@@ -511,6 +508,192 @@ async fn write_panicless_unexpected() {
             outcome: Err(tokio_io_mock_fork::MockOutcomeError::UnexpectedWrite),
             total_read_bytes: 0,
             total_written_bytes: 0,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_unexpected_shutdown() {
+    let (mut mock, _, p) = Builder::new().write(b"qqq").enable_shutdown_checking().build_panicless();
+
+    mock.shutdown().await.expect_err("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::ShutdownInsteadOfWrite),
+            total_read_bytes: 0,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown() {
+    let (mut mock, _, p) = Builder::new().write(b"qqq").enable_shutdown_checking().build_panicless();
+
+    mock.write_all(b"qqq").await.expect("shutdown");
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 3,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown2() {
+    let (mut mock, _, p) = Builder::new().enable_shutdown_checking().build_panicless();
+
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown3() {
+    let (mut mock, _, p) = Builder::new().read(b"qqq").enable_shutdown_checking().build_panicless();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"qqq");
+
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 3,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdow4() {
+    let (mut mock, _, p) = Builder::new().write(b"qqq").write_shutdown().build_panicless();
+
+    mock.write_all(b"qqq").await.expect("shutdown");
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 3,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown5() {
+    let (mut mock, _, p) = Builder::new().write_shutdown().build_panicless();
+
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown6() {
+    let (mut mock, _, p) = Builder::new().read(b"qqq").write_shutdown().build_panicless();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"qqq");
+
+    mock.shutdown().await.expect("shutdown");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 3,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_benign_shutdown7() {
+    let (mut mock, _, p) = Builder::new().write_shutdown().read(b"qqq").build_panicless();
+
+    let mut buf = [0; 256];
+    
+    mock.shutdown().await.expect("shutdown");
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"qqq");
+
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 3,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_write_instead_of_shutdown() {
+    let (mut mock, _, p) = Builder::new().write(b"qqq").write_shutdown().build_panicless();
+
+    mock.write_all(b"qqq").await.expect("write 1");
+    mock.write_all(b"wwww").await.expect_err("write 2");
+
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::WriteInsteadOfShutdown),
+            total_read_bytes: 0,
+            total_written_bytes: 3,
         })
     );
 }
