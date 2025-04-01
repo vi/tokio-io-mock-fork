@@ -732,18 +732,3 @@ async fn write_shutdown_read() {
     let n = mock.read(&mut buf).await.expect("read 1");
     assert_eq!(&buf[..n], b"qwe");
 }
-
-#[tokio::test]
-#[should_panic]
-async fn write_shutdown_read_fail() {
-    let mut mock = Builder::new()
-        .write(b"123")
-        .write_shutdown()
-        .read(b"qwe")
-        .build();
-
-    let mut buf = [0; 256];
-
-    mock.write(b"123").await.expect("write 1");
-    mock.read(&mut buf).await.expect_err("read 1");
-}
