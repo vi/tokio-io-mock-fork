@@ -499,9 +499,9 @@ impl Inner {
                                 *x,
                                 0,
                                 "byte_index={j} r={} w={} name={} remaining actions: {}",
-                                self.name,
                                 self.read_bytes,
                                 self.written_bytes,
+                                self.name,
                                 n_remaining_actions - i
                             );
                         }
