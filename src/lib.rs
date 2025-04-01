@@ -720,22 +720,21 @@ impl Inner {
                             total_written_bytes: self.written_bytes,
                         });
                         self.checks_enabled = false;
-                        *observed=true;
-                        return Err(io::ErrorKind::InvalidData.into())
+                        *observed = true;
+                        return Err(io::ErrorKind::InvalidData.into());
                     }
 
-                    if checks_enabled  {
-                            panic!(
+                    if checks_enabled {
+                        panic!(
                                 "unexpected write (a shutdown was expected) r={} w={} name={} remaining actions: {}",
                                 self.read_bytes,
                                 self.written_bytes,
                                 self.name,
                                 n_remaining_actions - i
                             );
-                        
                     } else {
-                        *observed=true;
-                        return Err(io::ErrorKind::InvalidData.into())
+                        *observed = true;
+                        return Err(io::ErrorKind::InvalidData.into());
                     }
                 }
                 Action::StopChecking => checks_enabled = false,

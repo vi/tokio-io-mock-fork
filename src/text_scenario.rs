@@ -163,15 +163,15 @@ pub(crate) fn parse_text_scenario(
             }
             (WaitingForCommandCharacter, b'X' | b'x') => {
                 actions.push(Action::ReadEof(false));
-                state=WaitingForCommandCharacter;
+                state = WaitingForCommandCharacter;
             }
             (WaitingForCommandCharacter, b'Q' | b'q') => {
                 actions.push(Action::StopChecking);
-                state=WaitingForCommandCharacter;
+                state = WaitingForCommandCharacter;
             }
             (WaitingForCommandCharacter, b'D' | b'd') => {
                 actions.push(Action::WriteShutdown(false));
-                state=WaitingForCommandCharacter;
+                state = WaitingForCommandCharacter;
             }
             (WaitingForCommandCharacter, b'i' | b'I') => {
                 bufmode = BufferMode::IgnoreWritten;
@@ -364,14 +364,11 @@ fn text_scenaio_3() {
     assert!(matches!(&ret.0[3], Action::Wait(t) if t.as_millis() == 0x112233));
 }
 
-
 #[test]
 fn text_scenaio_4() {
     let ret = parse_text_scenario("ZR45|ZW0|ZRx34|zw0x20").unwrap();
     assert_eq!(summarize_actions(&ret.0), "ZR45ZW0ZR52ZW32");
 }
-
-
 
 #[test]
 fn text_scenaio_5() {

@@ -515,7 +515,10 @@ async fn write_panicless_unexpected() {
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_unexpected_shutdown() {
-    let (mut mock, _, p) = Builder::new().write(b"qqq").enable_shutdown_checking().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .write(b"qqq")
+        .enable_shutdown_checking()
+        .build_panicless();
 
     mock.shutdown().await.expect_err("shutdown");
     drop(mock);
@@ -533,7 +536,10 @@ async fn write_panicless_unexpected_shutdown() {
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_benign_shutdown() {
-    let (mut mock, _, p) = Builder::new().write(b"qqq").enable_shutdown_checking().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .write(b"qqq")
+        .enable_shutdown_checking()
+        .build_panicless();
 
     mock.write_all(b"qqq").await.expect("shutdown");
     mock.shutdown().await.expect("shutdown");
@@ -570,7 +576,10 @@ async fn write_panicless_benign_shutdown2() {
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_benign_shutdown3() {
-    let (mut mock, _, p) = Builder::new().read(b"qqq").enable_shutdown_checking().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .read(b"qqq")
+        .enable_shutdown_checking()
+        .build_panicless();
 
     let mut buf = [0; 256];
 
@@ -590,11 +599,13 @@ async fn write_panicless_benign_shutdown3() {
     );
 }
 
-
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_benign_shutdow4() {
-    let (mut mock, _, p) = Builder::new().write(b"qqq").write_shutdown().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .write(b"qqq")
+        .write_shutdown()
+        .build_panicless();
 
     mock.write_all(b"qqq").await.expect("shutdown");
     mock.shutdown().await.expect("shutdown");
@@ -631,7 +642,10 @@ async fn write_panicless_benign_shutdown5() {
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_benign_shutdown6() {
-    let (mut mock, _, p) = Builder::new().read(b"qqq").write_shutdown().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .read(b"qqq")
+        .write_shutdown()
+        .build_panicless();
 
     let mut buf = [0; 256];
 
@@ -650,15 +664,17 @@ async fn write_panicless_benign_shutdown6() {
         })
     );
 }
-
 
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_benign_shutdown7() {
-    let (mut mock, _, p) = Builder::new().write_shutdown().read(b"qqq").build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .write_shutdown()
+        .read(b"qqq")
+        .build_panicless();
 
     let mut buf = [0; 256];
-    
+
     mock.shutdown().await.expect("shutdown");
 
     let n = mock.read(&mut buf).await.expect("read 1");
@@ -676,12 +692,13 @@ async fn write_panicless_benign_shutdown7() {
     );
 }
 
-
-
 #[cfg(feature = "panicless-mode")]
 #[tokio::test]
 async fn write_panicless_write_instead_of_shutdown() {
-    let (mut mock, _, p) = Builder::new().write(b"qqq").write_shutdown().build_panicless();
+    let (mut mock, _, p) = Builder::new()
+        .write(b"qqq")
+        .write_shutdown()
+        .build_panicless();
 
     mock.write_all(b"qqq").await.expect("write 1");
     mock.write_all(b"wwww").await.expect_err("write 2");
@@ -700,7 +717,11 @@ async fn write_panicless_write_instead_of_shutdown() {
 
 #[tokio::test]
 async fn write_shutdown_read() {
-    let mut mock = Builder::new().write(b"123").write_shutdown().read(b"qwe").build();
+    let mut mock = Builder::new()
+        .write(b"123")
+        .write_shutdown()
+        .read(b"qwe")
+        .build();
 
     let mut buf = [0; 256];
 
@@ -712,11 +733,14 @@ async fn write_shutdown_read() {
     assert_eq!(&buf[..n], b"qwe");
 }
 
-
 #[tokio::test]
 #[should_panic]
 async fn write_shutdown_read_fail() {
-    let mut mock = Builder::new().write(b"123").write_shutdown().read(b"qwe").build();
+    let mut mock = Builder::new()
+        .write(b"123")
+        .write_shutdown()
+        .read(b"qwe")
+        .build();
 
     let mut buf = [0; 256];
 
