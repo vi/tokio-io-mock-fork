@@ -765,32 +765,12 @@ impl Inner {
         let n_remaining_actions = self.actions.len();
         for i in 0..n_remaining_actions {
             let action = &mut self.actions[i];
+            let mut pending_writes = false;
             match action {
-                Action::Write(..)
-                | Action::IgnoreWritten(..)
-                | Action::WriteError(..)
-                | Action::WriteZeroes(..) => {
-                    #[cfg(feature = "panicless-mode")]
-                    if self.checks_enabled && self.panicless_tx.is_some() {
-                        let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
-                            outcome: Err(MockOutcomeError::ShutdownInsteadOfWrite),
-                            total_read_bytes: self.read_bytes,
-                            total_written_bytes: self.written_bytes,
-                        });
-                        self.checks_enabled = false;
-                        return Err(io::ErrorKind::InvalidData.into());
-                    }
-
-                    if checks_enabled {
-                        panic!(
-                            "Unexpected shutdown (there are more pending write actions) name={} r={} w={} remaining actions: {}",
-                            self.name,
-                            self.read_bytes,
-                            self.written_bytes,
-                            n_remaining_actions - i
-                        );
-                    }
-                }
+                Action::Write(ref buf) if !buf.is_empty() => pending_writes = true,
+                Action::IgnoreWritten(nbytes) if *nbytes > 0 => pending_writes = true,
+                Action::WriteError(ref x) if x.is_some() => pending_writes = true,
+                Action::WriteZeroes(nbytes) if *nbytes > 0 => pending_writes = true,
                 Action::WriteShutdown(ref mut observed) => {
                     *observed = true;
                     return Ok(());
@@ -800,6 +780,29 @@ impl Inner {
                     break;
                 }
                 _ => {}
+            }
+
+            if pending_writes {
+                #[cfg(feature = "panicless-mode")]
+                if self.checks_enabled && self.panicless_tx.is_some() {
+                    let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
+                        outcome: Err(MockOutcomeError::ShutdownInsteadOfWrite),
+                        total_read_bytes: self.read_bytes,
+                        total_written_bytes: self.written_bytes,
+                    });
+                    self.checks_enabled = false;
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+
+                if checks_enabled {
+                    panic!(
+                       "Unexpected shutdown (there are more pending write actions) name={} r={} w={} remaining actions: {}",
+                       self.name,
+                       self.read_bytes,
+                       self.written_bytes,
+                       n_remaining_actions - i
+                   );
+                }
             }
         }
 
