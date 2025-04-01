@@ -2,6 +2,11 @@
 name = "tokio-io-mock-fork"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/vi/tokio-io-mock-fork"
+license = "MIT"
+description = "Enhanced tokio_test::io::Mock"
+categories = ["development-tools::testing", "asynchronous"]
+keywords = ["tokio-test"]
 
 [dependencies]
 futures-core = "0.3.31"
