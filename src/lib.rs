@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs_alt, feature(doc_cfg))]
 //! A mock type implementing [`AsyncRead`] and [`AsyncWrite`].
 //!
-//! (fork of [`tokio_test::io`](https://docs.rs/tokio-test/latest/tokio_test/io/index.html)
+//! (fork of [`tokio_test::io`](https://docs.rs/tokio-test/latest/tokio_test/io/index.html))
 //!
 //!
 //! # Overview
