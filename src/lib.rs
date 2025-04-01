@@ -1,5 +1,7 @@
 #![cfg_attr(docsrs_alt, feature(doc_cfg))]
 //! A mock type implementing [`AsyncRead`] and [`AsyncWrite`].
+//! 
+//! (fork of [`tokio_test::io`](https://docs.rs/tokio-test/latest/tokio_test/io/index.html)
 //!
 //!
 //! # Overview
@@ -37,6 +39,62 @@ mod text_scenario;
 #[cfg(feature = "text-scenarios")]
 #[cfg_attr(docsrs_alt, doc(cfg(feature = "text-scenarios")))]
 pub use text_scenario::ParseError;
+
+#[cfg(feature = "panicless-mode")]
+#[cfg_attr(docsrs_alt, doc(cfg(feature = "panicless-mode")))]
+/// Details of an error detected by mock when in panicless mode.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MockOutcomeError {
+    UnexpectedWrite,
+    WrittenByteMismatch { expected: u8, actual: u8 },
+    RemainingUnreadData,
+    RemainingUnwrittenData,
+    Other,
+}
+
+#[cfg(feature = "panicless-mode")]
+impl std::fmt::Display for MockOutcomeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MockOutcomeError::UnexpectedWrite => f.write_str("unexpected write"),
+            MockOutcomeError::WrittenByteMismatch { expected, actual } => {
+                write!(f, "mismatching byte, expected {expected}, got {actual}")
+            }
+            MockOutcomeError::RemainingUnreadData => f.write_str("data remains to be read"),
+            MockOutcomeError::RemainingUnwrittenData => f.write_str("data remains to be written"),
+            MockOutcomeError::Other => f.write_str("other error"),
+        }
+    }
+}
+
+#[cfg(feature = "panicless-mode")]
+#[cfg_attr(docsrs_alt, doc(cfg(feature = "panicless-mode")))]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+/// Final report of a a mock when used in panicless mode
+pub struct MockOutcome {
+    /// `Ok` if the mock was dropped without an encountered error, `Err` otherwise
+    pub outcome: Result<(), MockOutcomeError>,
+
+    pub total_read_bytes: u64,
+    pub total_written_bytes: u64,
+}
+#[cfg(feature = "panicless-mode")]
+impl std::fmt::Display for MockOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.outcome {
+            Ok(()) => write!(
+                f,
+                "success after reading {} and writing {} bytes",
+                self.total_read_bytes, self.total_written_bytes
+            ),
+            Err(e) => write!(
+                f,
+                "error ({e}) after reading {} and writing {} bytes",
+                self.total_read_bytes, self.total_written_bytes
+            ),
+        }
+    }
+}
 
 /// An I/O object that follows a predefined script.
 ///
@@ -87,6 +145,8 @@ struct Inner {
     checks_enabled: bool,
     read_bytes: u64,
     written_bytes: u64,
+    #[cfg(feature = "panicless-mode")]
+    panicless_tx: Option<tokio::sync::oneshot::Sender<MockOutcome>>,
 }
 
 impl Builder {
@@ -154,6 +214,9 @@ impl Builder {
     ///
     /// The next operation in the mock's script will be to expect a `write`
     /// call. The written bytes will not be checked.
+    ///
+    /// Note that while content of the bytes are ignored,
+    /// specified number of bytes still must be written to the mock to avoid the failure.
     pub fn write_ignore(&mut self, nbytes: usize) -> &mut Self {
         self.actions.push_back(Action::IgnoreWritten(nbytes));
         self
@@ -262,6 +325,25 @@ impl Builder {
 
         (mock, handle)
     }
+
+    /// Build a `Mock` value that should not normally panic.
+    ///
+    /// Instead of panicking when a mismatch is detected, it should signal the outcome to the channel.
+    #[cfg(feature = "panicless-mode")]
+    #[cfg_attr(docsrs_alt, doc(cfg(feature = "panicless-mode")))]
+    pub fn build_panicless(
+        &mut self,
+    ) -> (Mock, Handle, tokio::sync::oneshot::Receiver<MockOutcome>) {
+        let (mut inner, handle) = Inner::new(self.actions.clone(), self.name.clone());
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        inner.panicless_tx = Some(tx);
+
+        let mock = Mock { inner };
+
+        (mock, handle, rx)
+    }
 }
 
 impl Handle {
@@ -324,6 +406,9 @@ impl Handle {
     ///
     /// The next operation in the mock's script will be to expect a `write`
     /// call. The written bytes will not be checked.
+    ///
+    /// Note that while content of the bytes are ignored,
+    /// specified number of bytes still must be written to the mock to avoid the failure.
     pub fn write_ignore(&mut self, nbytes: usize) -> &mut Self {
         self.tx.send(Action::IgnoreWritten(nbytes)).unwrap();
         self
@@ -385,6 +470,8 @@ impl Inner {
             checks_enabled: true,
             read_bytes: 0,
             written_bytes: 0,
+            #[cfg(feature = "panicless-mode")]
+            panicless_tx: None,
         };
 
         let handle = Handle { tx };
@@ -466,7 +553,31 @@ impl Inner {
                 Action::Write(ref mut expect) => {
                     let n = cmp::min(src.len(), expect.len());
 
-                    if self.checks_enabled {
+                    #[allow(unused_mut)]
+                    let mut already_checked = false;
+
+                    #[cfg(feature = "panicless-mode")]
+                    if self.checks_enabled && self.panicless_tx.is_some() {
+                        for i in 0..n {
+                            let expected = expect[i];
+                            let actual = src[i];
+                            if expected != actual {
+                                let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
+                                    outcome: Err(MockOutcomeError::WrittenByteMismatch {
+                                        expected,
+                                        actual,
+                                    }),
+                                    total_read_bytes: self.read_bytes,
+                                    total_written_bytes: self.written_bytes,
+                                });
+                                self.checks_enabled = false;
+                            }
+                            self.written_bytes += 1;
+                        }
+                        already_checked = true;
+                    }
+
+                    if self.checks_enabled && !already_checked {
                         assert_eq!(
                             &src[..n],
                             &expect[..n],
@@ -476,8 +587,11 @@ impl Inner {
                             self.written_bytes,
                             n_remaining_actions - i
                         );
+                        self.written_bytes += n as u64;
                     }
-                    self.written_bytes += n as u64;
+                    if !already_checked {
+                        self.written_bytes += n as u64;
+                    }
 
                     // Drop data that was matched
                     expect.drain(..n);
@@ -492,7 +606,32 @@ impl Inner {
                 Action::WriteZeroes(ref mut nbytes) | Action::IgnoreWritten(ref mut nbytes) => {
                     let n = cmp::min(src.len(), *nbytes);
 
-                    if checks_enabled && !ignore_written {
+                    #[allow(unused_mut)]
+                    let mut already_checked = false;
+
+                    #[cfg(feature = "panicless-mode")]
+                    if self.checks_enabled && !ignore_written && self.panicless_tx.is_some() {
+                        for i in 0..n {
+                            let expected = 0;
+                            let actual = src[i];
+                            if expected != actual {
+                                // lifetimes block refactoring here
+                                let _ = self.panicless_tx.take().unwrap().send(MockOutcome {
+                                    outcome: Err(MockOutcomeError::WrittenByteMismatch {
+                                        expected,
+                                        actual,
+                                    }),
+                                    total_read_bytes: self.read_bytes,
+                                    total_written_bytes: self.written_bytes,
+                                });
+                                self.checks_enabled = false;
+                            }
+                            self.written_bytes += 1;
+                        }
+                        already_checked = true;
+                    }
+
+                    if checks_enabled && !ignore_written && !already_checked {
                         for (j, x) in src[..n].iter().enumerate() {
                             self.written_bytes += 1;
                             assert_eq!(
@@ -506,7 +645,9 @@ impl Inner {
                             );
                         }
                     } else {
-                        self.written_bytes += n as u64;
+                        if !already_checked {
+                            self.written_bytes += n as u64;
+                        }
                     }
 
                     // Drop data that was matched
@@ -694,6 +835,16 @@ impl AsyncWrite for Mock {
                         self.inner.actions.push_back(action);
                     }
                     Poll::Ready(None) => {
+                        #[cfg(feature = "panicless-mode")]
+                        if self.inner.checks_enabled && self.inner.panicless_tx.is_some() {
+                            let _ = self.inner.panicless_tx.take().unwrap().send(MockOutcome {
+                                outcome: Err(MockOutcomeError::UnexpectedWrite),
+                                total_read_bytes: self.inner.read_bytes,
+                                total_written_bytes: self.inner.written_bytes,
+                            });
+                            self.inner.checks_enabled = false;
+                        }
+
                         if self.inner.checks_enabled {
                             panic!("unexpected write {}", self.pmsg());
                         } else {
@@ -709,6 +860,16 @@ impl AsyncWrite for Mock {
                         let until = Instant::now() + rem;
                         self.inner.sleep = Some(Box::pin(time::sleep_until(until)));
                     } else {
+                        #[cfg(feature = "panicless-mode")]
+                        if self.inner.checks_enabled && self.inner.panicless_tx.is_some() {
+                            let _ = self.inner.panicless_tx.take().unwrap().send(MockOutcome {
+                                outcome: Err(MockOutcomeError::Other),
+                                total_read_bytes: self.inner.read_bytes,
+                                total_written_bytes: self.inner.written_bytes,
+                            });
+                            self.inner.checks_enabled = false;
+                        }
+
                         if self.inner.checks_enabled {
                             panic!("unexpected WouldBlock {}", self.pmsg());
                         } else {
@@ -729,6 +890,16 @@ impl AsyncWrite for Mock {
                             continue;
                         }
                         None => {
+                            #[cfg(feature = "panicless-mode")]
+                            if self.inner.checks_enabled && self.inner.panicless_tx.is_some() {
+                                let _ = self.inner.panicless_tx.take().unwrap().send(MockOutcome {
+                                    outcome: Err(MockOutcomeError::UnexpectedWrite),
+                                    total_read_bytes: self.inner.read_bytes,
+                                    total_written_bytes: self.inner.written_bytes,
+                                });
+                                self.inner.checks_enabled = false;
+                            }
+
                             if self.inner.checks_enabled {
                                 panic!("unexpected write {}", self.pmsg());
                             } else {
@@ -757,6 +928,42 @@ impl AsyncWrite for Mock {
 /// Ensures that Mock isn't dropped with data "inside".
 impl Drop for Mock {
     fn drop(&mut self) {
+        #[cfg(feature = "panicless-mode")]
+        if let Some(tx) = self.inner.panicless_tx.take() {
+            let mut outcome = Ok(());
+
+            if self.inner.checks_enabled {
+                self.inner.actions.iter().for_each(|a| match a {
+                    Action::Read(data) if !data.is_empty() => {
+                        outcome = Err(MockOutcomeError::RemainingUnreadData)
+                    }
+                    Action::ReadZeroes(nbytes) if *nbytes > 0 => {
+                        outcome = Err(MockOutcomeError::RemainingUnreadData)
+                    }
+                    Action::ReadEof(observed) if !observed => {
+                        outcome = Err(MockOutcomeError::RemainingUnreadData)
+                    }
+                    Action::Write(data) if !data.is_empty() => {
+                        outcome = Err(MockOutcomeError::RemainingUnwrittenData)
+                    }
+                    Action::WriteZeroes(nbytes) if *nbytes > 0 => {
+                        outcome = Err(MockOutcomeError::RemainingUnwrittenData)
+                    }
+                    Action::IgnoreWritten(nbytes) if *nbytes > 0 => {
+                        outcome = Err(MockOutcomeError::RemainingUnwrittenData)
+                    }
+                    _ => (),
+                });
+            }
+
+            let _ = tx.send(MockOutcome {
+                outcome,
+                total_read_bytes: self.inner.read_bytes,
+                total_written_bytes: self.inner.written_bytes,
+            });
+            return;
+        }
+
         // Avoid double panicking, since makes debugging much harder.
         if std::thread::panicking() {
             return;

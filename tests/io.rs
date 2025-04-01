@@ -321,3 +321,196 @@ async fn multiple_wait() {
         start.elapsed().as_millis()
     );
 }
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn mock_panicless_read_data_left() {
+    use tokio_io_mock_fork::Builder;
+    let (m, _, p) = Builder::new().read(b"read").build_panicless();
+    drop(m);
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::RemainingUnreadData),
+            total_read_bytes: 0,
+            total_written_bytes: 0
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn mock_panicless_read_data() {
+    use tokio_io_mock_fork::Builder;
+    let (mut mock, _, p) = Builder::new().read(b"read").build_panicless();
+
+    let mut buf = [0; 256];
+
+    let n = mock.read(&mut buf).await.expect("read 1");
+    assert_eq!(&buf[..n], b"read");
+
+    drop(mock);
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 4,
+            total_written_bytes: 0,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write(b"world!")
+        .build_panicless();
+
+    mock.write_all(b"hello ").await.expect("write 1");
+    mock.write_all(b"world!").await.expect("write 2");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 12,
+        })
+    );
+}
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_err() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write(b"world!")
+        .build_panicless();
+
+    mock.write_all(b"hello ").await.expect("write 1");
+    mock.write_all(b"wor4d!").await.expect("write 2");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::WrittenByteMismatch {
+                expected: b'l',
+                actual: b'4'
+            }),
+            total_read_bytes: 0,
+            total_written_bytes: 9,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_err2() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write(b"world!")
+        .build_panicless();
+
+    mock.write_all(b"hello ").await.expect("write 1");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::RemainingUnwrittenData),
+            total_read_bytes: 0,
+            total_written_bytes: 6,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_zero() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write_zeroes(3)
+        .build_panicless();
+
+    mock.write_all(b"hello \0\0\0").await.expect("write 1");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Ok(()),
+            total_read_bytes: 0,
+            total_written_bytes: 9,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_zero_err() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write_zeroes(3)
+        .build_panicless();
+
+    mock.write_all(b"hello \0\x05\0").await.expect("write 1");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::WrittenByteMismatch { expected: 0, actual: 5 }),
+            total_read_bytes: 0,
+            total_written_bytes: 7,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_err3() {
+    let (mut mock, _, p) = Builder::new()
+        .write(b"hello ")
+        .write_ignore(3)
+        .build_panicless();
+
+    mock.write_all(b"hello \0\x05").await.expect("write 1");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::RemainingUnwrittenData),
+            total_read_bytes: 0,
+            total_written_bytes: 8,
+        })
+    );
+}
+
+
+#[cfg(feature = "panicless-mode")]
+#[tokio::test]
+async fn write_panicless_unexpected() {
+    let (mut mock, _, p) = Builder::new()
+        .build_panicless();
+
+    mock.write_all(b"hello").await.expect_err("write 1");
+    drop(mock);
+
+    assert_eq!(
+        p.await,
+        Ok(tokio_io_mock_fork::MockOutcome {
+            outcome: Err(tokio_io_mock_fork::MockOutcomeError::UnexpectedWrite),
+            total_read_bytes: 0,
+            total_written_bytes: 0,
+        })
+    );
+}

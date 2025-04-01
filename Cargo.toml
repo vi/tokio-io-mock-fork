@@ -15,6 +15,7 @@ tokio = { version = "1.44.1", features = ["io-util", "macros", "rt", "test-util"
 
 [features]
 text-scenarios = ["dep:hex"]
+panicless-mode = ["tokio/sync"]
 
 [package.metadata."docs.rs"]
 all-features = true
